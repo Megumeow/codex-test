@@ -1,0 +1,23 @@
+selected_norad_ids: []
+case_selection_limit: 5
+selected_object_types:
+  - Payload
+  - Rocket Body
+  - Debris
+cords_page_url: https://aerospace.org/reentries
+cords_grid_url: https://aerospace.org/reentries/grid
+natural_earth_land_url: https://naciscdn.org/naturalearth/10m/physical/ne_10m_land.zip
+natural_earth_countries_url: https://naciscdn.org/naturalearth/10m/cultural/ne_10m_admin_0_countries.zip
+corridor_width_km: 200
+use_spacetrack_if_available: true
+use_tle_track_if_available: true
+use_population_raster_if_available: true
+country_population_fallback: true
+population_raster_path: null
+country_population_csv: null
+outputs_dir: outputs
+manual_path_file: data/sample_path.csv
+track_duration_hours: 6
+track_step_minutes: 10
+min_training_rows: 24
+random_state: 42
