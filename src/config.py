@@ -106,6 +106,11 @@ class AppConfig:
     track_step_minutes: int = 10
     min_training_rows: int = 24
     random_state: int = 42
+    use_autogluon_if_available: bool = True
+    autogluon_time_limit_seconds: int = 60
+    autogluon_presets: str = "medium_quality"
+    autogluon_model_candidates: str = "tree_ensemble"
+    autogluon_enable_weighted_ensemble: bool = True
 
     def ensure_directories(self) -> None:
         for path in (
@@ -166,6 +171,11 @@ def load_config(config_path: str | Path | None = None) -> AppConfig:
         track_step_minutes=int(data.get("track_step_minutes", 10)),
         min_training_rows=int(data.get("min_training_rows", 24)),
         random_state=int(data.get("random_state", 42)),
+        use_autogluon_if_available=bool(data.get("use_autogluon_if_available", True)),
+        autogluon_time_limit_seconds=int(data.get("autogluon_time_limit_seconds", 60)),
+        autogluon_presets=str(data.get("autogluon_presets", "medium_quality")),
+        autogluon_model_candidates=str(data.get("autogluon_model_candidates", "tree_ensemble")),
+        autogluon_enable_weighted_ensemble=bool(data.get("autogluon_enable_weighted_ensemble", True)),
     )
     cfg.ensure_directories()
     return cfg

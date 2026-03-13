@@ -21,3 +21,8 @@ track_duration_hours: 6
 track_step_minutes: 10
 min_training_rows: 24
 random_state: 42
+use_autogluon_if_available: true
+autogluon_time_limit_seconds: 60
+autogluon_presets: medium_quality
+autogluon_model_candidates: tree_ensemble
+autogluon_enable_weighted_ensemble: true

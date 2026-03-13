@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass
 
 import numpy as np
@@ -23,6 +24,14 @@ except ImportError:  # pragma: no cover
     LinearRegression = None
     Pipeline = None
     SKLEARN_AVAILABLE = False
+
+try:
+    from autogluon.tabular import TabularPredictor
+
+    AUTOGLUON_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    TabularPredictor = None
+    AUTOGLUON_AVAILABLE = False
 
 from src.config import AppConfig
 from src.io_utils import write_dataframe
@@ -147,16 +156,95 @@ def _fit_and_score(train_df: pd.DataFrame, test_df: pd.DataFrame, config: AppCon
     for model_name, model in candidate_models.items():
         pipeline = Pipeline([("prep", preprocessor), ("model", model)])
         pipeline.fit(train_df[FEATURE_COLUMNS], train_df["hours_to_decay"])
-        predictions = pipeline.predict(test_df[FEATURE_COLUMNS])
+        predictions = _predict_with_model(model_name, pipeline, test_df)
         mae = _mae(test_df["hours_to_decay"], predictions)
         rmse = _rmse(test_df["hours_to_decay"], predictions)
         metrics_rows.append({"model_name": model_name, "mae_hours": mae, "rmse_hours": rmse})
         models[model_name] = pipeline
+
+    if config.use_autogluon_if_available:
+        if not AUTOGLUON_AVAILABLE:
+            LOGGER.info("AutoGluon is not installed in this environment; skipping optional AutoGluon model.")
+        else:
+            try:
+                predictor = _fit_autogluon_predictor(train_df, config)
+                autogluon_model_name = f"autogluon::{predictor.model_best}"
+                predictions = _predict_with_model(autogluon_model_name, predictor, test_df)
+                mae = _mae(test_df["hours_to_decay"], predictions)
+                rmse = _rmse(test_df["hours_to_decay"], predictions)
+                metrics_rows.append({"model_name": autogluon_model_name, "mae_hours": mae, "rmse_hours": rmse})
+                models[autogluon_model_name] = predictor
+            except Exception as exc:
+                LOGGER.warning("AutoGluon training failed; continuing without it: %s", exc)
+
     return models, pd.DataFrame(metrics_rows)
 
 
-def _extract_feature_importance(model_name: str, fitted_pipeline: object) -> pd.DataFrame:
-    model_step = fitted_pipeline.named_steps["model"]
+def _autogluon_hyperparameters(config: AppConfig) -> dict[str, dict] | None:
+    if config.autogluon_model_candidates == "full_auto":
+        return None
+    if config.autogluon_model_candidates == "tree_ensemble":
+        return {"GBM": {}, "CAT": {}, "XGB": {}}
+    if config.autogluon_model_candidates == "gbm_only":
+        return {"GBM": {}}
+    return {"GBM": {}, "CAT": {}, "XGB": {}}
+
+
+def _fit_autogluon_predictor(train_df: pd.DataFrame, config: AppConfig) -> object:
+    model_dir = config.processed_dir / "time_window_models" / "autogluon_tabular"
+    if model_dir.exists():
+        shutil.rmtree(model_dir, ignore_errors=True)
+    model_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    train_data = train_df[FEATURE_COLUMNS + ["hours_to_decay"]].copy()
+    predictor = TabularPredictor(
+        label="hours_to_decay",
+        problem_type="regression",
+        path=str(model_dir),
+        eval_metric="mean_absolute_error",
+    )
+    predictor.fit(
+        train_data=train_data,
+        time_limit=config.autogluon_time_limit_seconds,
+        presets=config.autogluon_presets,
+        hyperparameters=_autogluon_hyperparameters(config),
+        fit_weighted_ensemble=config.autogluon_enable_weighted_ensemble,
+        num_bag_folds=0,
+        num_stack_levels=0,
+        raise_on_no_models_fitted=False,
+        verbosity=0,
+        num_cpus=1,
+        num_gpus=0,
+        fit_strategy="sequential",
+    )
+    if not predictor.model_names():
+        raise RuntimeError("AutoGluon did not train any usable models.")
+    return predictor
+
+
+def _predict_with_model(model_name: str, fitted_model: object, frame: pd.DataFrame) -> pd.Series:
+    if model_name.startswith("autogluon::"):
+        predicted = fitted_model.predict(frame[FEATURE_COLUMNS])
+        return pd.to_numeric(pd.Series(predicted, index=frame.index), errors="coerce")
+    predicted = fitted_model.predict(frame[FEATURE_COLUMNS])
+    return pd.Series(predicted, index=frame.index)
+
+
+def _extract_feature_importance(model_name: str, fitted_model: object, reference_df: pd.DataFrame) -> pd.DataFrame:
+    if model_name.startswith("autogluon::"):
+        importance = fitted_model.feature_importance(reference_df[FEATURE_COLUMNS + ["hours_to_decay"]], silent=True)
+        if importance.empty:
+            return pd.DataFrame(columns=["feature", "importance", "model_name"])
+        feature_col = importance.reset_index().columns[0]
+        return (
+            importance.reset_index()
+            .rename(columns={feature_col: "feature"})[["feature", "importance"]]
+            .assign(model_name=model_name)
+            .sort_values("importance", ascending=False)
+            .reset_index(drop=True)
+        )
+
+    model_step = fitted_model.named_steps["model"]
     if hasattr(model_step, "feature_importances_"):
         importance_values = getattr(model_step, "feature_importances_")
     elif hasattr(model_step, "coef_"):
@@ -193,15 +281,15 @@ def run_time_window_model(
             selected_model_name = metrics.sort_values("mae_hours").iloc[0]["model_name"]
             best_model = models[selected_model_name]
             test_predictions = test_df.copy()
-            test_predictions["predicted_hours_to_decay"] = best_model.predict(test_df[FEATURE_COLUMNS])
+            test_predictions["predicted_hours_to_decay"] = _predict_with_model(selected_model_name, best_model, test_df)
             test_predictions["model_name"] = selected_model_name
             test_predictions["split"] = "test"
             predictions_frames.append(test_predictions)
 
-            feature_importance = _extract_feature_importance(selected_model_name, best_model)
+            feature_importance = _extract_feature_importance(selected_model_name, best_model, train_df)
 
             latest_rows = dataset.sort_values("epoch").groupby("norad_id").tail(1).copy()
-            latest_rows["predicted_hours_to_decay"] = best_model.predict(latest_rows[FEATURE_COLUMNS])
+            latest_rows["predicted_hours_to_decay"] = _predict_with_model(selected_model_name, best_model, latest_rows)
             latest_rows["model_name"] = selected_model_name
             latest_rows["split"] = "latest_row"
             predictions_frames.append(latest_rows)
